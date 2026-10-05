@@ -7,7 +7,7 @@ const fresh = () => ({ balance: C.initialBalance, position: null, history: [], l
 function load() { try { return Object.assign(fresh(), JSON.parse(localStorage.getItem(KEY))); } catch (e) { return fresh(); } }
 let S = load(), M = null, ind = null, sig = null, aiMode = 'LOCAL STRATEGY', api = '', busy = false, riskMsg = '';
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
-function log(m) { S.logs.unshift({ t: Date.now(), m }); S.logs = S.logs.slice(0, 80); save(); renderLog(); }
+function log(m) { S.logs.unshift({ t: Date.now(), m }); S.logs = S.logs.slice(0, 150); save(); renderLog(); }
 const hms = t => new Date(t).toTimeString().slice(0, 8);
 
 // ---------- Market data (with SIMULATED fallback) ----------
@@ -104,6 +104,19 @@ function monitor() {
   S.position = null; save(); log(`<i>CLOSE POSITION ${pnl >= 0 ? 'PROFIT' : 'LOSS'}</i> ${sgn(pnl)}`);
 }
 
+// Detail satu baris per scan: nilai indikator + status tiap kondisi (✓ terpenuhi, ✗ tidak)
+function scanDetail(i, s) {
+  const bull = s.signal === 'BUY' || (s.signal === 'HOLD' && i.ema9 >= i.ema21);
+  const k = (ok, t) => t + (ok ? ' ✓' : ' ✗');
+  const f = [k(bull ? i.ema9 > i.ema21 : i.ema9 < i.ema21, 'EMA9' + (bull ? '>' : '&lt;') + '21'),
+    k(bull ? i.price > i.ema50 : i.price < i.ema50, 'EMA50'),
+    k(bull ? i.hist > 0 : i.hist < 0, 'MACD ' + (i.hist > 0 ? '+' : '') + i.hist.toFixed(2)),
+    k(bull ? i.rsi > 45 && i.rsi < 70 : i.rsi < 55 && i.rsi > 30, 'RSI ' + i.rsi.toFixed(0)),
+    k(i.volRatio >= .8, 'VOL ' + i.volRatio.toFixed(1) + 'x'),
+    k(bull ? i.mom > 0 : i.mom < 0, 'MOM ' + i.mom.toFixed(2) + '%')];
+  return `<i>${s.signal}</i> (${bull ? 'bull' : 'bear'} check) @ ${px(i.price)} | ` + f.join(' | ') + ' | ATR ' + px(i.atr);
+}
+
 // ---------- Bot loop ----------
 async function scan() {
   if (busy) return; busy = true;
@@ -112,6 +125,7 @@ async function scan() {
     await loadMarket();
     monitor();
     sig = strategy(ind); sig.candle = ind.candleTime; riskMsg = M.sim ? 'Entry blocked: market data is SIMULATED (API offline)' : '';
+    log(scanDetail(ind, sig));
     if (sig.signal !== 'HOLD' && !M.sim && S.running && !S.paused && S.auto && !S.position) {
       log(`${S.market} ${sig.signal} candidate`);
       sig = await aiReview(sig); sig.candle = ind.candleTime;
