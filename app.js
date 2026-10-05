@@ -6,7 +6,6 @@ const px = n => fmt(n, n < 10 ? 4 : 2), cls = n => (n >= 0 ? 'pos' : 'neg');
 const fresh = () => ({ balance: C.initialBalance, position: null, history: [], logs: [], running: false, paused: false, auto: true, market: C.markets[0], lastEntryCandle: 0 });
 function load() { try { return Object.assign(fresh(), JSON.parse(localStorage.getItem(KEY))); } catch (e) { return fresh(); } }
 let S = load(), M = null, ind = null, sig = null, aiMode = 'LOCAL STRATEGY', api = '', busy = false, riskMsg = '';
-let chart, candleSeries, lines = [];
 function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
 function log(m) { S.logs.unshift({ t: Date.now(), m }); S.logs = S.logs.slice(0, 80); save(); renderLog(); }
 const hms = t => new Date(t).toTimeString().slice(0, 8);
@@ -150,30 +149,34 @@ function render() {
   const p = S.position;
   $('pos').innerHTML = p ? `<b class="${p.side === 'BUY' ? 'pos' : 'neg'}">${p.side}</b> ${p.market} · entry ${px(p.entry)} · SL ${px(p.sl)} · TP ${px(p.tp)}<br>qty ${p.qty.toPrecision(4)} · risk ${usd(p.risk)} · unrealized <b class="${cls(M ? pnlOf(p, M.price) : 0)}">${M ? sgn(pnlOf(p, M.price)) : '-'}</b>` : 'No open position';
   $('hist').innerHTML = S.history.length ? S.history.slice(0, 30).map(h => `<div class="tr"><span>${hms(h.closedAt)} · ${h.market}</span><span class="${h.side === 'BUY' ? 'pos' : 'neg'}">${h.side}</span><span>Entry ${px(h.entry)}</span><span>Exit ${px(h.exit)}</span><b class="${cls(h.pnl)}">${sgn(h.pnl)}</b><b class="${cls(h.pnl)}">${h.result}</b></div>`).join('') : '<span class="muted">No trades yet</span>';
-  renderChart(); save();
+  try { renderChart(); } catch (e) {} save();
 }
 function renderLog() { $('log').innerHTML = S.logs.map(l => `[${hms(l.t)}] ${l.m}`).join('<br>'); }
-function snap(t) { if (!M) return null; let r = null; for (const c of M.candles) if (c.t <= t) r = c.t; return r ? r / 1000 : null; }
+// Chart candlestick buatan sendiri (canvas, tanpa library eksternal)
 function renderChart() {
-  if (!M || !window.LightweightCharts) return;
-  if (!chart) { chart = LightweightCharts.createChart($('chart'), { layout: { background: { color: 'transparent' }, textColor: '#8a97ab' }, grid: { vertLines: { color: '#13203a' }, horzLines: { color: '#13203a' } }, timeScale: { timeVisible: true }, autoSize: true });
-    candleSeries = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444', borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444' }); }
-  candleSeries.setData(M.candles.map(c => ({ time: c.t / 1000, open: c.o, high: c.h, low: c.l, close: c.c })));
-  lines.forEach(l => candleSeries.removePriceLine(l)); lines = [];
-  const L = (price, color, title) => lines.push(candleSeries.createPriceLine({ price, color, title, lineWidth: 1, lineStyle: 2 }));
-  const p = S.position, g = sig && sig.signal !== 'HOLD' ? sig : null;
-  if (p && p.market === S.market) { L(p.entry, '#22d3ee', 'ENTRY'); L(p.sl, '#ef4444', 'SL'); L(p.tp, '#22c55e', 'TP'); }
-  else if (g) { L(g.entryPrice, '#22d3ee', 'ENTRY?'); L(g.stopLoss, '#ef4444', 'SL'); L(g.takeProfit, '#22c55e', 'TP'); }
-  const mk = [], add = (t, side, pos, color, shape, text) => { const s = snap(t); if (s) mk.push({ time: s, position: pos, color, shape, text }); };
-  [...S.history.filter(h => h.market === S.market)].forEach(h => { add(h.openedAt, h.side, h.side === 'BUY' ? 'belowBar' : 'aboveBar', '#22d3ee', h.side === 'BUY' ? 'arrowUp' : 'arrowDown', h.side);
-    add(h.closedAt, 'x', h.side === 'BUY' ? 'aboveBar' : 'belowBar', h.pnl >= 0 ? '#22c55e' : '#ef4444', 'circle', h.result); });
-  if (p && p.market === S.market) add(p.openedAt, p.side, p.side === 'BUY' ? 'belowBar' : 'aboveBar', '#22d3ee', p.side === 'BUY' ? 'arrowUp' : 'arrowDown', p.side);
-  mk.sort((a, b) => a.time - b.time); candleSeries.setMarkers(mk);
+  const cv = $('chart'); if (!M || !cv || !cv.getContext) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight; if (!W || !H) return;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const x = cv.getContext('2d'); x.scale(dpr, dpr);
+  const cs = M.candles.slice(-80), p = S.position && S.position.market === S.market ? S.position : null, g = sig && sig.signal !== 'HOLD' ? sig : null;
+  const lv = p ? [[p.entry, '#22d3ee', 'ENTRY'], [p.sl, '#ef4444', 'SL'], [p.tp, '#22c55e', 'TP']] : g ? [[g.entryPrice, '#22d3ee', 'ENTRY?'], [g.stopLoss, '#ef4444', 'SL'], [g.takeProfit, '#22c55e', 'TP']] : [];
+  let hi = Math.max(...cs.map(c => c.h), ...lv.map(l => l[0])), lo = Math.min(...cs.map(c => c.l), ...lv.map(l => l[0]));
+  const pad = (hi - lo) * .06 || 1; hi += pad; lo -= pad;
+  const R = 62, w = (W - R) / cs.length, Y = v => H - (v - lo) / (hi - lo) * H;
+  x.font = '10px sans-serif';
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4, y = Y(v); x.strokeStyle = '#13203a'; x.beginPath(); x.moveTo(0, y); x.lineTo(W - R, y); x.stroke(); x.fillStyle = '#8a97ab'; x.fillText(px(v), W - R + 4, y + 3); }
+  cs.forEach((c, i) => { const cx = i * w + w / 2, col = c.c >= c.o ? '#22c55e' : '#ef4444'; x.strokeStyle = x.fillStyle = col;
+    x.beginPath(); x.moveTo(cx, Y(c.h)); x.lineTo(cx, Y(c.l)); x.stroke(); x.fillRect(cx - w * .35, Math.min(Y(c.o), Y(c.c)), w * .7, Math.max(1, Math.abs(Y(c.o) - Y(c.c)))); });
+  lv.forEach(([v, col, t]) => { x.strokeStyle = x.fillStyle = col; x.setLineDash([4, 3]); x.beginPath(); x.moveTo(0, Y(v)); x.lineTo(W - R, Y(v)); x.stroke(); x.setLineDash([]); x.fillText(t + ' ' + px(v), 4, Y(v) - 3); });
+  const idx = t => { let r = -1; cs.forEach((c, i) => { if (c.t <= t) r = i; }); return r; };
+  const mark = (t, v, col, ch) => { const i = idx(t); if (i < 0) return; x.fillStyle = col; x.font = '12px sans-serif'; x.fillText(ch, i * w + w / 2 - 5, Y(v) + 4); };
+  S.history.filter(h => h.market === S.market).forEach(h => { mark(h.openedAt, h.entry, '#22d3ee', h.side === 'BUY' ? '▲' : '▼'); mark(h.closedAt, h.exit, h.pnl >= 0 ? '#22c55e' : '#ef4444', '●'); });
+  if (p) mark(p.openedAt, p.entry, '#22d3ee', p.side === 'BUY' ? '▲' : '▼');
 }
 
 // ---------- Controls ----------
 $('market').innerHTML = C.markets.map(m => `<option>${m}</option>`).join('');
-$('market').onchange = e => { S.market = e.target.value; sig = null; riskMsg = ''; chart && (lines = [], chart.remove(), chart = null); scan(); };
+$('market').onchange = e => { S.market = e.target.value; sig = null; riskMsg = ''; scan(); };
 $('bStart').onclick = () => { S.running = true; S.paused = false; log('BOT STARTED (SIMULATION MODE)'); scan(); };
 $('bStop').onclick = () => { S.running = false; S.paused = false; log('BOT STOPPED - no new trades' + (S.position ? ', open position still monitored' : '')); render(); };
 $('bPause').onclick = () => { if (!S.running) return; S.paused = !S.paused; log(S.paused ? 'BOT PAUSED' : 'BOT RESUMED'); render(); };
